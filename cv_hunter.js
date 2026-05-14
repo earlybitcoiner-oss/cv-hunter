@@ -5,6 +5,7 @@ const multer = require('multer');
 const mammoth = require('mammoth');
 const fs = require('fs');
 const path = require('path');
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(cors());
@@ -13,8 +14,16 @@ app.use(express.json());
 const upload = multer({ dest: 'uploads/' });
 
 const openai = new OpenAI({ 
-  apiKey: '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', 
+  apiKey: process.env.GROQ_API_KEY, 
   baseURL: "https://api.groq.com/openai/v1" 
+});
+
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_PASS
+  }
 });
 
 const usersFile = path.join(__dirname, 'users.json');
@@ -69,7 +78,6 @@ async function analyzeCV(cvText) {
     const clean = text.replace(/```json|```/g, '').trim();
     return JSON.parse(clean);
   } catch (e) {
-    console.error('[CV] JSON parse error:', e.message);
     return null;
   }
 }
@@ -101,7 +109,6 @@ async function findMatchingJobs(cvAnalysis) {
     const clean = text.replace(/```json|```/g, '').trim();
     return JSON.parse(clean);
   } catch (e) {
-    console.error('[JOBS] JSON parse error:', e.message);
     return [];
   }
 }
@@ -125,25 +132,35 @@ async function writeCoverLetter(cvAnalysis, job) {
   return response.choices[0].message.content;
 }
 
+async function sendEmail(to, subject, body, fromName) {
+  try {
+    await transporter.sendMail({
+      from: '"' + fromName + '" <' + process.env.GMAIL_USER + '>',
+      to: to,
+      subject: subject,
+      text: body
+    });
+    return true;
+  } catch (e) {
+    console.error('[EMAIL] Error:', e.message);
+    return false;
+  }
+}
+
 app.post('/api/upload-cv', upload.single('cv'), async function(req, res) {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     
-    console.log('[CV] Reading file:', req.file.originalname);
     const cvText = await readCVFile(req.file.path, req.file.mimetype);
     
     if (!cvText || cvText.length < 50) {
       return res.status(400).json({ error: 'Could not read CV file' });
     }
     
-    console.log('[CV] Analyzing CV... length:', cvText.length);
     const analysis = await analyzeCV(cvText);
-    
     if (!analysis) return res.status(500).json({ error: 'Could not analyze CV' });
     
-    console.log('[CV] Profile found:', analysis.name);
     const jobs = await findMatchingJobs(analysis);
-    console.log('[CV] Found', jobs.length, 'matching jobs');
     
     const userId = Date.now().toString();
     const users = loadUsers();
@@ -168,7 +185,6 @@ app.post('/api/upload-cv', upload.single('cv'), async function(req, res) {
       jobs: jobs
     });
   } catch (e) {
-    console.error('[CV] Error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -180,18 +196,24 @@ app.post('/api/send-applications', async function(req, res) {
   
   if (!user) return res.status(404).json({ error: 'User not found' });
   
-  console.log('[SEND] Sending applications for:', user.name);
   const results = [];
   
   for (const job of user.jobs) {
     try {
       const coverLetter = await writeCoverLetter(user.analysis, job);
-      console.log('[SEND] Prepared application for:', job.company);
+      
+      const emailSent = await sendEmail(
+        job.email,
+        'פנייה לתפקיד ' + job.position + ' - ' + user.analysis.name,
+        coverLetter,
+        user.analysis.name
+      );
+      
       results.push({ 
         company: job.company, 
         position: job.position, 
         email: job.email,
-        status: 'sent', 
+        status: emailSent ? 'sent' : 'failed',
         reason: job.reason,
         coverLetter: coverLetter
       });
